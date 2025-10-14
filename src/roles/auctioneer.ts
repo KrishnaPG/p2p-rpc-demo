@@ -1,4 +1,4 @@
-import { RPCServer } from "@agree-able/rpc";
+//import { RPCServer } from "@agree-able/rpc";
 import crypto from "crypto";
 import { EventEmitter } from "events";
 import Hyperswarm from "hyperswarm";
@@ -33,22 +33,24 @@ export class Auctioneer extends EventEmitter implements IAuctioneerAPI {
 			`[AUCTIONEER] Auction started! Topic: ${this.topic.toString("hex")}`,
 		);
 		const swarm = new Hyperswarm();
-		const server = new RPCServer();
-
-		server.provide(IAuctioneerAPI, this);
-
-		// Listen to our own event and broadcast it to all connected clients
-		this.on("highestBidUpdate", (bid) => {
-			server.broadcast("highestBidUpdate", [bid]);
-		});
-
 		swarm.join(this.topic);
-		swarm.on("connection", (conn) => {
-			console.log(`[AUCTIONEER] Bidder connected.`);
-			server.setup(conn);
-		});
 
-		await swarm.flushed();
+    let highestBid = 0;
+    const bidders = new Set();
+
+		swarm.on("connection", (conn) => {
+        bidders.add(conn);
+        console.log(`[AUCTIONEER] Bidder joined. Total: ${bidders.size}`);
+        conn.on('data', (data) => {
+            const bid = parseInt(data.toString());
+            if (bid > highestBid) {
+                highestBid = bid;
+                console.log(`[AUCTIONEER] New highest bid: ${bid}`);
+                bidders.forEach(b => b.write(`Current highest: ${highestBid}`));
+            }
+        });		});
+
+		await swarm.flush();
 	}
 
 	getTopic(): string {

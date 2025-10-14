@@ -1,4 +1,4 @@
-import { RPCClient } from "@agree-able/rpc";
+//import { RPCClient } from "@agree-able/rpc";
 import Hyperswarm from "hyperswarm";
 import type { IAuctioneerAPI } from "../interfaces/aunctioneer";
 
@@ -9,20 +9,11 @@ export class Bidder {
 		swarm.join(Buffer.from(topicHex, "hex"));
 
 		swarm.on("connection", (conn) => {
-			console.log("[BIDDER] Connected to auctioneer.");
-			const client = new RPCClient<IAuctioneerAPI>(conn);
-
-			// Listen for updates from the auctioneer
-			client.on("highestBidUpdate", (bid) => {
-				console.log(`[BIDDER] Update: New highest bid is ${bid}`);
-			});
-
-			// Place a bid after a short delay
-			setTimeout(() => {
-				const myBid = Math.floor(Math.random() * 100);
-				console.log(`[BIDDER] Placing bid: ${myBid}`);
-				client.placeBid(myBid);
-			}, 1000);
+			console.log('[BIDDER] Connected to auctioneer.');
+			conn.on('data', (data) => console.log('[BIDDER] Update:', data.toString()));
+			const myBid = Math.floor(Math.random() * 100);
+			console.log(`[BIDDER] Placing bid: ${myBid}`);
+			conn.write(myBid.toString());
 		});
 
 		await swarm.flush();

@@ -23,17 +23,13 @@ export class Provider implements IProviderAPI {
 	async start() {
 		console.log("[PROVIDER] Starting...");
 		const swarm = new Hyperswarm();
-		const server = new RPCServer();
-
-		server.provide(IProviderAPI, this);
 
 		swarm.join(MARKET_TOPIC, { server: true, client: false });
 		swarm.on("connection", (conn) => {
 			console.log("[PROVIDER] Consumer connected.");
-			server.setup(conn);
 		});
 
-		await swarm.flushed();
+		await swarm.flush();
 		console.log("[PROVIDER] Announced on the network.");
 	}
 }
