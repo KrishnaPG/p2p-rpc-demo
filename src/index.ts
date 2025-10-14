@@ -1,9 +1,9 @@
-import { Auctioneer } from "./roles/auctioneer.js";
-import { Bidder } from "./roles/bidder.js";
-import { Consumer } from "./roles/consumer.js";
-import { Provider } from "./roles/provider.js";
+import { Auctioneer } from "./roles/auctioneer";
+import { Bidder } from "./roles/bidder";
+import { Consumer } from "./roles/consumer";
+import { Provider } from "./roles/provider";
 
-const role = process.argv[2];
+const role = process.argv[2] || "provider";
 const auctionTopicArg = process.argv[3];
 
 const run = async () => {

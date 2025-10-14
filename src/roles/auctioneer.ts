@@ -2,7 +2,7 @@ import { RPCServer } from "@agree-able/rpc";
 import crypto from "crypto";
 import { EventEmitter } from "events";
 import Hyperswarm from "hyperswarm";
-import { IAuctioneerAPI } from "../interfaces/auctioneer.js";
+import type { IAuctioneerAPI } from "../interfaces/aunctioneer";
 
 export class Auctioneer extends EventEmitter implements IAuctioneerAPI {
 	private highestBid = 0;

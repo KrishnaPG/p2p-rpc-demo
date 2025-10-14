@@ -1,0 +1,25 @@
+{
+  "name": "p2p-rpc-demo",
+  "version": "1.0.0",
+  "description": "",
+  "type":"module",
+  "module": "index.js",
+  "scripts": {
+    "provider": "ts-node src/index.ts provider",
+    "consumer": "ts-node src/index.ts consumer",
+    "auctioneer": "ts-node src/index.ts auctioneer",
+    "bidder": "ts-node src/index.ts bidder"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "dependencies": {
+    "@agree-able/rpc": "^3.0.0",
+    "hyperswarm": "^4.14.2",
+    "ts-node": "^10.9.2",
+    "typescript": "^5.9.3"
+  },
+  "devDependencies": {
+    "@types/node": "^24.7.2"
+  }
+}

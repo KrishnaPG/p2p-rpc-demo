@@ -1,6 +1,6 @@
 import { RPCClient } from "@agree-able/rpc";
 import Hyperswarm from "hyperswarm";
-import type { IAuctioneerAPI } from "../interfaces/auctioneer.js";
+import type { IAuctioneerAPI } from "../interfaces/aunctioneer";
 
 export class Bidder {
 	async start(topicHex: string) {

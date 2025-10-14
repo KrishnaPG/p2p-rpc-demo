@@ -1,6 +1,6 @@
 import { RPCClient } from "@agree-able/rpc";
 import Hyperswarm from "hyperswarm";
-import type { IProviderAPI } from "../interfaces/provider.js";
+import type { IProviderAPI } from "../interfaces/provider";
 
 const MARKET_TOPIC = Buffer.alloc(32).fill("p2p-market-demo");
 
