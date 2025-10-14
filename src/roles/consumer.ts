@@ -10,8 +10,9 @@ export class Consumer {
 		const swarm = new Hyperswarm();
 		swarm.join(MARKET_TOPIC, { server: false, client: true });
 
-		swarm.on("connection", async (conn) => {
-			console.log("[CONSUMER] Connected to a provider."); return;
+		swarm.on("connection", async (conn, peerInfo) => {
+			console.log(`[CONSUMER] Connected to a provider: ${peerInfo.publicKey.toString("hex")}`); 
+			conn.on("data", d => console.log(`[CONSUMER] received: ${d.toString()}`))
 		});
 
 		await swarm.flush();

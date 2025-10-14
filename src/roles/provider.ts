@@ -25,8 +25,11 @@ export class Provider implements IProviderAPI {
 		const swarm = new Hyperswarm();
 
 		swarm.join(MARKET_TOPIC, { server: true, client: false });
-		swarm.on("connection", (conn) => {
-			console.log("[PROVIDER] Consumer connected.");
+		swarm.on("connection", (conn, peerInfo) => {
+			console.log(`[PROVIDER] Consumer connected: ${peerInfo.publicKey.toString("hex")}`);
+			conn.on("data", (d) =>
+				console.log(`[PROVIDER] received: ${d.toString()}`),
+			);
 		});
 
 		await swarm.flush();
