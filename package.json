@@ -15,6 +15,7 @@
     "typescript": "^5"
   },
   "dependencies": {
-    "@agree-able/rpc": "^3.0.0"
+    "@agree-able/rpc": "^3.0.0",
+    "cbor-x": "^1.6.0"
   }
 }
