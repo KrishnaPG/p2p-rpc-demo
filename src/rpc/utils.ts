@@ -1,4 +1,4 @@
-import type { TP2PMethodSpec, TP2PStreamHandler } from "./transport";
+import type { TP2PMethodSpec, TP2PStreamHandler } from "./types";
 
 export class RpcError extends Error {
 	constructor(
@@ -6,31 +6,6 @@ export class RpcError extends Error {
 		message: string,
 	) {
 		super(message);
-	}
-}
-
-export class AsyncSink<T = any> {
-	private q: T[] = [];
-	private ended = false;
-	private wait?: () => void;
-	async *getIterator() {
-		while (true) {
-			while (this.q.length) yield this.q.shift();
-			if (this.ended) return;
-			await new Promise<void>((r) => (this.wait = r));
-		}
-	}
-	push(v: T) {
-		this.q.push(v);
-		this.wait?.();
-	}
-	end(e?: T) {
-		this.ended = true;
-		if (e) this.q.push(Promise.reject(e));
-		this.wait?.();
-	}
-	[Symbol.asyncIterator]() {
-		return this.getIterator();
 	}
 }
 

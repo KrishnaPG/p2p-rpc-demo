@@ -1,95 +1,173 @@
 import { encode } from "cbor-x";
+import { TransportError } from "./errors";
+import { gFramePool, MAX_FRAME_SIZE } from "./frame-pool";
+import { RingBuffer } from "./ring-buffer";
+import type { FrameType, ISocketLike, TP2PPayload } from "./types";
 import { concat } from "./utils";
 
-/* ========== types ========== */
-export type TP2PPayload = any;
-export type TP2PHandler = (req: TP2PPayload) => Promise<TP2PPayload | void>;
-export type TP2PStreamHandler = (
-	req: TP2PPayload,
-) => AsyncIterable<TP2PPayload>;
-export type TP2PMethodSpec = TP2PHandler | TP2PStreamHandler | null; // null = fire-and-forget
-
-export interface ISocketLike {
-	send(data: Uint8Array): Promise<unknown>;
-	onData: (cb: (data: Uint8Array) => void) => void;
-	onClose?: (cb: () => void) => void;
-}
-
-/* ========== framing ========== */
-export enum FrameType {
-	Request = 0,
-	Response = 1,
-	StreamItem = 2,
-	Error = 3,
-	Close = 4,
-	Ack = 5,
-	Ping = 6,
-	Pong = 7,
-	Faf = 8,
-}
-
-function makeFrame(
+export function makeFrame(
 	streamId: number,
 	type: FrameType,
 	payload: Uint8Array,
 ): Uint8Array {
-	const frame = new Uint8Array(8 + payload.length);
-	const v = new DataView(frame.buffer);
+	const totalSize = 8 + payload.length;
+
+	if (totalSize > MAX_FRAME_SIZE + 8) {
+		throw new TransportError(`Frame too large: ${totalSize} bytes`);
+	}
+
+	// Allocate from pool
+	const buf = gFramePool.alloc(totalSize);
+
+	// Build frame header
+	const v = new DataView(buf.buffer, buf.byteOffset);
 	v.setUint32(0, streamId, true);
-	v.setUint8(4, (payload.length >>> 0) & 0xff);
+	v.setUint8(4, payload.length & 0xff);
 	v.setUint8(5, (payload.length >>> 8) & 0xff);
 	v.setUint8(6, (payload.length >>> 16) & 0xff);
 	v.setUint8(7, type);
-	frame.set(payload, 8);
-	return frame;
+
+	// Copy payload
+	buf.set(payload, 8);
+
+	// Return slice (caller is responsible for releasing)
+	return buf.subarray(0, totalSize);
 }
 
-function* parseFrames(chunk: Uint8Array): Generator<Uint8Array, void> {
-	let off = 0;
-	while (off + 8 <= chunk.length) {
-		const v = new DataView(chunk.buffer, chunk.byteOffset);
-		const streamId = v.getUint32(off, true);
-		const len =
-			v.getUint8(off + 4) +
-			(v.getUint8(off + 5) << 8) +
-			(v.getUint8(off + 6) << 16);
-		const type = v.getUint8(off + 7);
-		if (chunk.length < off + 8 + len) break; // need more
-		yield chunk.subarray(off, off + 8 + len);
-		off += 8 + len;
+export function parseFrame(frame: Uint8Array): {
+	streamId: number;
+	type: FrameType;
+	payload: Uint8Array;
+} {
+	const v = new DataView(frame.buffer, frame.byteOffset);
+	return {
+		streamId: v.getUint32(0, true),
+		type: v.getUint8(7) as FrameType,
+		payload: frame.subarray(8),
+	};
+}
+
+class FrameParser {
+	private buffer = new RingBuffer();
+
+	constructor(private onFrameHandler: (f: Uint8Array) => void) {}
+
+	feed(chunk: Uint8Array): void {
+		this.buffer.write(chunk);
+
+		while (this.buffer.available >= 8) {
+			// 1. PEEK: Get a temporary copy of the header from the pool.
+			const header = this.buffer.peek(8);
+			if (!header) break;
+
+			// 2. READ: Read the length from the temporary copy.
+			const v = new DataView(header.buffer, header.byteOffset);
+			const len = v.getUint8(4) | (v.getUint8(5) << 8) | (v.getUint8(6) << 16);
+
+			// 3. RELEASE: We are done with the header copy. Return it to the pool.
+			// This does NOT affect the data inside the RingBuffer.
+			this.buffer.releasePeekBuffer(header);
+
+			if (len > MAX_FRAME_SIZE) {
+				throw new TransportError(`Frame too large: ${len} bytes`);
+			}
+
+			const totalLen = 8 + len;
+			if (this.buffer.available < totalLen) break; // Not enough data to construct frames yet
+
+			// 4. PEEK: Get a temporary copy of the full frame from the pool.
+			const frame = this.buffer.peek(totalLen);
+			if (!frame) break;
+
+			// 5. PROCESS: Give the temporary frame copy to the handler.
+			// handler must NOT release the frame, since we release it below;
+			this.onFrameHandler(frame);
+
+			// 6. CONSUME: This is the crucial step. We now tell the RingBuffer
+			// to discard its original data (header + payload). This advances the
+			// read pointer and frees up space in the RingBuffer's internal memory.
+			this.buffer.consume(totalLen);
+
+			// 7. RELEASE (Conditional): If the handler signaled it's done with the
+			// frame copy, we can now return it to the pool.
+			this.buffer.releasePeekBuffer(frame);
+		}
 	}
-	if (off < chunk.length) (parseFrames as any).remainder = chunk.subarray(off);
+
+	reset(): void {
+		this.buffer.destroy();
+		this.buffer = new RingBuffer();
+	}
 }
 
-/* ========== shared transport ========== */
 export class FramedTransport {
-	private recvBuffer = new Uint8Array(0);
+	private parser: FrameParser;
+	private closed = false;
+
 	constructor(
 		private socket: ISocketLike,
-		private onFrame: (f: Uint8Array) => void,
+		onFrame: (f: Uint8Array) => void,
 	) {
-		socket.onData((b) => this.feed(b));
+		this.parser = new FrameParser(onFrame);
+		socket.onData((data) => this.feed(data));
+		socket.onClose?.(() => this.handleClose());
 	}
-	feed(chunk: Uint8Array) {
-		const rem = (parseFrames as any).remainder;
-		if (rem) chunk = concat(rem, chunk);
-		for (const f of parseFrames(chunk)) this.onFrame(f);
-		(parseFrames as any).remainder = undefined;
+
+	feed(chunk: Uint8Array): void {
+		if (this.closed) return;
+		try {
+			this.parser.feed(chunk);
+		} catch (err) {
+			console.error("Frame parsing error:", err);
+			this.close();
+		}
 	}
-	send(streamId: number, type: FrameType, body: TP2PPayload) {
-		const payload = encode(body);
-		return this.socket.send(makeFrame(streamId, type, payload));
+
+	async send(
+		streamId: number,
+		type: FrameType,
+		body: TP2PPayload,
+	): Promise<void> {
+		if (this.closed) throw new TransportError("Transport closed");
+
+		let pooledBuffer: Uint8Array | null = null;
+		try {
+			const payload =
+				body !== null && body !== undefined ? encode(body) : new Uint8Array(0);
+			const frame = makeFrame(streamId, type, payload);
+
+			// Keep reference to the underlying pooled buffer
+			pooledBuffer = new Uint8Array(frame.buffer);
+
+			await this.socket.send(frame);
+
+			// Successfully sent - release back to pool
+			return gFramePool.release(pooledBuffer);
+		} catch (err) {
+			// Release on error too
+			if (pooledBuffer) {
+				gFramePool.release(pooledBuffer);
+			}
+			throw new TransportError(`Send failed: ${err}`);
+		}
+	}
+
+	close(): void {
+		if (this.closed) return;
+		this.closed = true;
+		this.parser.reset();
+	}
+
+	private handleClose(): void {
+		this.close();
+	}
+
+	get isClosed(): boolean {
+		return this.closed;
+	}
+
+	// Expose pool stats for monitoring
+	getPoolStats() {
+		return gFramePool.stats();
 	}
 }
-
-/* ========== client ========== */
-
-
-/* ========== server ========== */
-
-
-/* ========== helpers ========== */
-
-
-/* ========== quick self-test ========== */
-

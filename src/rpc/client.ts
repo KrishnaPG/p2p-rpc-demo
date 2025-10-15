@@ -1,98 +1,223 @@
 import { decode } from "cbor-x";
-import { FramedTransport, FrameType, type TP2PPayload } from "./transport";
-import { AsyncSink, methodWithToken, RpcError } from "./utils";
+import { AsyncSink } from "./async-sink";
+import { TransportError } from "./errors";
+import { FramedTransport, parseFrame } from "./transport";
+import {
+	FrameType,
+	MAX_PENDING_REQUESTS,
+	PING_INTERVAL,
+	PONG_TIMEOUT,
+	type TP2PPayload,
+} from "./types";
+import { RpcError } from "./utils";
+
+interface PendingRequest {
+	resolve: (v: any) => void;
+	reject: (e: any) => void;
+	sink?: AsyncSink;
+	timer?: NodeJS.Timeout;
+}
+
+export type TCloseCB = () => Promise<void>;
 
 export class RpcClient {
-	private t: FramedTransport;
-	private pend = new Map<
-		number,
-		{ res: (v: any) => void; rej: (e: any) => void; stream?: AsyncSink }
-	>();
-	private nextId = 1;
+	private transport: FramedTransport;
+	private pending = new Map<number, PendingRequest>();
+	private idCounter = new Int32Array(new SharedArrayBuffer(4));
+	private heartbeatTimer?: NodeJS.Timeout;
+	private lastActivityTime = Date.now();
+	private closed = false;
+	private closeCallbacks: Array<TCloseCB> = [];
+
 	constructor(
 		send: (d: Uint8Array) => Promise<void>,
 		recv: (cb: (d: Uint8Array) => void) => void,
 	) {
-		this.t = new FramedTransport({ send, onData: recv }, (f) => this.handle(f));
+		this.idCounter[0] = 1; // Start at 1
+		this.transport = new FramedTransport({ send, onData: recv }, (f) =>
+			this.handleFrame(f),
+		);
+		this.startHeartbeat();
 	}
-	/* ---------- unary ---------- */
-	call(
+
+	async call(
 		method: string,
 		params: TP2PPayload,
 		opts?: { timeout?: number; signal?: AbortSignal },
 	): Promise<TP2PPayload> {
-		const id = this.allocId();
-		const obj = { method, params };
-		return new Promise((res, rej) => {
-			this.pend.set(id, { res, rej });
-			this.t.send(id, FrameType.Request, obj).catch(rej);
-			if (opts?.signal)
-				opts.signal.addEventListener("abort", () => this.cancel(id));
-			if (opts?.timeout) setTimeout(() => this.cancel(id), opts.timeout);
-		});
-	}
-	/* ---------- server stream ---------- */
-	stream(method: string, params: TP2PPayload, opts?: { signal?: AbortSignal }) {
-		const id = this.allocId();
-		const obj = { method, params };
-		const iter = new AsyncSink();
-		this.pend.set(id, {
-			res: iter.push.bind(iter),
-			rej: iter.end.bind(iter),
-			stream: iter,
-		});
-		this.t.send(id, FrameType.Request, obj);
-		if (opts?.signal)
-			opts.signal.addEventListener("abort", () => this.cancel(id));
-		return iter[Symbol.asyncIterator]();
-	}
-	/* ---------- fire-and-forget ---------- */
-	faf(method: string, params: TP2PPayload) {
-		this.t.send(0, FrameType.Faf, { method, params });
-	}
-	/* ---------- job ---------- */
-	async job(method: string, params: TP2PPayload): Promise<string> {
-		return (await this.call(method, params)) as string;
-	}
-	async result(token: string): Promise<TP2PPayload> {
-		return this.call(methodWithToken(method, token), {});
-	}
-	/* ---------- cancel ---------- */
-	async cancel(streamId: number) {
-		this.t.send(streamId, FrameType.Close, null);
-		const p = this.pend.get(streamId);
-		if (p) {
-			p.rej(new Error("cancelled"));
-			this.pend.delete(streamId);
+		if (this.closed) throw new TransportError("Client closed");
+		if (this.pending.size >= MAX_PENDING_REQUESTS) {
+			throw new TransportError("Too many pending requests");
 		}
+
+		const id = this.allocId();
+		return new Promise<TP2PPayload>((resolve, reject) => {
+			const req: PendingRequest = { resolve, reject };
+
+			if (opts?.timeout) {
+				req.timer = setTimeout(() => {
+					this.cancelRequest(id, new RpcError(-32000, "Request timeout"));
+				}, opts.timeout);
+			}
+
+			if (opts?.signal) {
+				opts.signal.addEventListener("abort", () => {
+					this.cancelRequest(id, new RpcError(-32000, "Request aborted"));
+				});
+			}
+
+			this.pending.set(id, req);
+			this.transport
+				.send(id, FrameType.Request, { method, params })
+				.catch((err) => {
+					this.cancelRequest(id, err);
+				});
+		});
 	}
-	/* ---------- internals ---------- */
-	private allocId() {
-		const id = this.nextId;
-		this.nextId += 2; // client keeps odd
-		return id;
+
+	stream(
+		method: string,
+		params: TP2PPayload,
+		opts?: { signal?: AbortSignal },
+	): AsyncIterableIterator<TP2PPayload> {
+		if (this.closed) throw new TransportError("Client closed");
+
+		const id = this.allocId();
+		const sink = new AsyncSink();
+
+		this.pending.set(id, {
+			resolve: (v) => sink.push(v),
+			reject: (e) => sink.end(e),
+			sink,
+		});
+
+		this.transport
+			.send(id, FrameType.Request, { method, params })
+			.catch((err) => {
+				this.cancelRequest(id, err);
+			});
+
+		if (opts?.signal) {
+			opts.signal.addEventListener("abort", () => {
+				this.cancelRequest(id, new RpcError(-32000, "Stream aborted"));
+			});
+		}
+
+		return sink[Symbol.asyncIterator]();
 	}
-	private handle(frame: Uint8Array) {
-		const v = new DataView(frame.buffer, frame.byteOffset);
-		const streamId = v.getUint32(0, true);
-		const type = v.getUint8(7);
-		const body = decode(frame.subarray(8));
-		const p = this.pend.get(streamId);
-		if (!p) return;
+
+	// fire-and-forget
+	faf(method: string, params: TP2PPayload): Promise<void> {
+		if (this.closed) return Promise.reject(`Cannot send on closed connection`);
+		return this.transport.send(-1, FrameType.Faf, { method, params });
+	}
+
+	onClose(cb: TCloseCB): void {
+		this.closeCallbacks.push(cb);
+	}
+
+	close() {
+		if (this.closed) return;
+		this.closed = true;
+
+		if (this.heartbeatTimer) clearInterval(this.heartbeatTimer);
+
+		const error = new TransportError("Client closed");
+		this.pending.forEach((p) => p.reject(error));
+		this.pending.clear();
+
+		this.transport.close();
+		return Promise.allSettled(this.closeCallbacks.map((cb) => cb()));
+	}
+
+	private allocId(): number {
+		// Atomic lock-free ID allocation
+		// Atomics.add returns the OLD value, so we get unique IDs
+		const id = Atomics.add(this.idCounter, 0, 2);
+
+		// Ensure odd parity for client (server uses even)
+		return id | 1;
+	}
+
+	private cancelRequest(streamId: number, error: Error): Promise<void> {
+		const p = this.pending.get(streamId);
+		if (!p) return Promise.reject(`No pending stream exits for id: ${streamId}`);
+
+		if (p.timer) clearTimeout(p.timer);
+		p.reject(error);
+		this.pending.delete(streamId);
+
+		return this.transport.send(streamId, FrameType.Close, null).catch(() => {});
+	}
+
+	private handleFrame(frame: Uint8Array): Promise<void> {
+		const { streamId, type, payload } = parseFrame(frame);
+
+		// Any incoming frame is proof of life
+		this.lastActivityTime = Date.now();
+
+		if (type === FrameType.Ping) {
+			return this.transport.send(streamId, FrameType.Pong, null).catch(() => {});
+		}
+
+		if (type === FrameType.Pong) return Promise.resolve();
+
+		const p = this.pending.get(streamId);
+		if (!p) return Promise.reject(`No pending stream exits for id: ${streamId}`);
+
+		const body = payload.length > 0 ? decode(payload) : null;
+
 		switch (type) {
 			case FrameType.Response:
+				if (p.timer) clearTimeout(p.timer);
+				p.resolve(body);
+				this.pending.delete(streamId);
+				break;
+
 			case FrameType.StreamItem:
-				p.res(body);
-				if (type === FrameType.Response) this.pend.delete(streamId);
+				if (p.sink) p.sink.push(body);
 				break;
-			case FrameType.Error:
-				p.rej(new RpcError(body.code, body.message));
-				this.pend.delete(streamId);
+
+			case FrameType.StreamEnd:
+				if (p.sink) p.sink.end();
+				if (p.timer) clearTimeout(p.timer);
+				this.pending.delete(streamId);
 				break;
+
+			case FrameType.Error: {
+				if (p.timer) clearTimeout(p.timer);
+				const err = new RpcError(body.code, body.message);
+				p.reject(err);
+				this.pending.delete(streamId);
+				break;
+			}
+
 			case FrameType.Close:
-				p.rej(new Error("server closed"));
-				this.pend.delete(streamId);
+				if (p.timer) clearTimeout(p.timer);
+				p.reject(new TransportError("Server closed stream"));
+				this.pending.delete(streamId);
 				break;
 		}
+		return Promise.resolve();
+	}
+
+	private startHeartbeat(): void {
+		this.heartbeatTimer = setInterval(() => {
+			if (this.closed) return;
+
+			const timeSinceLastActivity = Date.now() - this.lastActivityTime;
+
+			// Close if no incoming activity for longer than ping + pong timeout
+			if (timeSinceLastActivity >= PING_INTERVAL + PONG_TIMEOUT) {
+				console.error("Connection idle timeout - closing");
+				this.close();
+				return;
+			}
+
+			// Send explicit ping only if idle
+			if (timeSinceLastActivity >= PING_INTERVAL) {
+				this.transport.send(0, FrameType.Ping, null).catch(() => {});
+			}
+		}, PING_INTERVAL);
 	}
 }
