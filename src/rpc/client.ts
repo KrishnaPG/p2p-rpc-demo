@@ -32,7 +32,7 @@ export class RpcClient {
 
 	constructor(conn: TP2PEncryptedSocket, heartBeat: boolean = false) {
 		this.idCounter[0] = 1; // Start at 1
-		conn.on("close", ()=>this.close());
+		conn.once("close", ()=>this.close());
 		this.transport = new FramedTransport(conn, (f) => this.handleFrame(f));
 		if (heartBeat) this.startHeartbeat();
 	}

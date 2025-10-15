@@ -8,34 +8,34 @@ import type {
 	TP2PPayload,
 } from "./types";
 
-export function makeFrame(
-	streamId: number,
-	type: FrameType,
-	payload: Uint8Array,
-): Uint8Array {
-	const totalSize = 8 + payload.length;
+// export function makeFrame(
+// 	streamId: number,
+// 	type: FrameType,
+// 	payload: Uint8Array,
+// ): Uint8Array {
+// 	const totalSize = 8 + payload.length;
 
-	if (totalSize > MAX_FRAME_SIZE + 8) {
-		throw new TransportError(`Frame too large: ${totalSize} bytes`);
-	}
+// 	if (totalSize > MAX_FRAME_SIZE + 8) {
+// 		throw new TransportError(`Frame too large: ${totalSize} bytes`);
+// 	}
 
-	// Allocate from pool
-	const buf = gFramePool.alloc(totalSize);
+// 	// Allocate from pool
+// 	const buf = gFramePool.alloc(totalSize);
 
-	// Build frame header
-	const v = new DataView(buf.buffer, buf.byteOffset);
-	v.setUint32(0, streamId, true);
-	v.setUint8(4, payload.length & 0xff);
-	v.setUint8(5, (payload.length >>> 8) & 0xff);
-	v.setUint8(6, (payload.length >>> 16) & 0xff);
-	v.setUint8(7, type);
+// 	// Build frame header
+// 	const v = new DataView(buf.buffer, buf.byteOffset);
+// 	v.setUint32(0, streamId, true);
+// 	v.setUint8(4, payload.length & 0xff);
+// 	v.setUint8(5, (payload.length >>> 8) & 0xff);
+// 	v.setUint8(6, (payload.length >>> 16) & 0xff);
+// 	v.setUint8(7, type);
 
-	// Copy payload
-	buf.set(payload, 8);
+// 	// Copy payload
+// 	buf.set(payload, 8);
 
-	// Return slice (caller is responsible for releasing)
-	return buf.subarray(0, totalSize);
-}
+// 	// Return slice (caller is responsible for releasing)
+// 	return buf.subarray(0, totalSize);
+// }
 
 export function parseFrame(frame: Uint8Array): {
 	streamId: number;
