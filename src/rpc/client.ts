@@ -7,6 +7,7 @@ import {
 	MAX_PENDING_REQUESTS,
 	PING_INTERVAL,
 	PONG_TIMEOUT,
+	type TP2PEncryptedSocket,
 	type TP2PPayload,
 } from "./types";
 import { RpcError } from "./utils";
@@ -29,23 +30,20 @@ export class RpcClient {
 	private closed = false;
 	private closeCallbacks: Array<TCloseCB> = [];
 
-	constructor(
-		send: (d: Uint8Array) => Promise<void>,
-		recv: (cb: (d: Uint8Array) => void) => void,
-	) {
+	constructor(conn: TP2PEncryptedSocket, heartBeat: boolean = false) {
 		this.idCounter[0] = 1; // Start at 1
-		this.transport = new FramedTransport({ send, onData: recv }, (f) =>
-			this.handleFrame(f),
-		);
-		this.startHeartbeat();
+		conn.on("close", ()=>this.close());
+		this.transport = new FramedTransport(conn, (f) => this.handleFrame(f));
+		if (heartBeat) this.startHeartbeat();
 	}
 
-	async call(
+	call(
 		method: string,
 		params: TP2PPayload,
 		opts?: { timeout?: number; signal?: AbortSignal },
 	): Promise<TP2PPayload> {
 		if (this.closed) throw new TransportError("Client closed");
+
 		if (this.pending.size >= MAX_PENDING_REQUESTS) {
 			throw new TransportError("Too many pending requests");
 		}
@@ -67,14 +65,14 @@ export class RpcClient {
 			}
 
 			this.pending.set(id, req);
-			this.transport
+			return this.transport
 				.send(id, FrameType.Request, { method, params })
 				.catch((err) => {
 					this.cancelRequest(id, err);
 				});
 		});
 	}
-
+	// AsyncIterableIterator<TP2PPayload>
 	stream(
 		method: string,
 		params: TP2PPayload,
@@ -91,17 +89,15 @@ export class RpcClient {
 			sink,
 		});
 
-		this.transport
-			.send(id, FrameType.Request, { method, params })
-			.catch((err) => {
-				this.cancelRequest(id, err);
-			});
-
 		if (opts?.signal) {
 			opts.signal.addEventListener("abort", () => {
 				this.cancelRequest(id, new RpcError(-32000, "Stream aborted"));
 			});
 		}
+
+		this.transport
+			.send(id, FrameType.Request, { method, params })
+			.catch((err) => this.cancelRequest(id, err));
 
 		return sink[Symbol.asyncIterator]();
 	}
@@ -116,8 +112,8 @@ export class RpcClient {
 		this.closeCallbacks.push(cb);
 	}
 
-	close() {
-		if (this.closed) return;
+	close(): Promise<unknown> {
+		if (this.closed) return Promise.resolve();
 		this.closed = true;
 
 		if (this.heartbeatTimer) clearInterval(this.heartbeatTimer);
@@ -130,6 +126,7 @@ export class RpcClient {
 		return Promise.allSettled(this.closeCallbacks.map((cb) => cb()));
 	}
 
+	// TODO: the idCounter has to be reset to 1 when this.pending goes to zero
 	private allocId(): number {
 		// Atomic lock-free ID allocation
 		// Atomics.add returns the OLD value, so we get unique IDs
@@ -141,7 +138,8 @@ export class RpcClient {
 
 	private cancelRequest(streamId: number, error: Error): Promise<void> {
 		const p = this.pending.get(streamId);
-		if (!p) return Promise.reject(`No pending stream exits for id: ${streamId}`);
+		if (!p)
+			return Promise.reject(`No pending stream exits for id: ${streamId}`);
 
 		if (p.timer) clearTimeout(p.timer);
 		p.reject(error);
@@ -157,13 +155,16 @@ export class RpcClient {
 		this.lastActivityTime = Date.now();
 
 		if (type === FrameType.Ping) {
-			return this.transport.send(streamId, FrameType.Pong, null).catch(() => {});
+			return this.transport
+				.send(streamId, FrameType.Pong, null)
+				.catch(() => {});
 		}
 
 		if (type === FrameType.Pong) return Promise.resolve();
 
 		const p = this.pending.get(streamId);
-		if (!p) return Promise.reject(`No pending stream exits for id: ${streamId}`);
+		if (!p)
+			return Promise.reject(`No pending stream exits for id: ${streamId}`);
 
 		const body = payload.length > 0 ? decode(payload) : null;
 

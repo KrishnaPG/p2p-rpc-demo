@@ -3,7 +3,7 @@ import {
 	FramedTransport,
 	parseFrame,
 } from "./transport";
-import { FrameType, type TP2PHandler, type TP2PMethodSpec, type TP2PPayload, type TP2PStreamHandler } from "./types";
+import { FrameType, type TP2PEncryptedSocket, type TP2PHandler, type TP2PMethodSpec, type TP2PPayload, type TP2PStreamHandler } from "./types";
 import { isStream } from "./utils";
 
 export class RpcServer {
@@ -11,12 +11,9 @@ export class RpcServer {
   private activeStreams = new Map<number, AbortController>(); // TODO: cleaning up inactive steams?
   private closed = false;
 
-  constructor(
-    send: (d: Uint8Array) => Promise<void>,
-    recv: (cb: (d: Uint8Array) => void) => void,
-    private handlers: Record<string, TP2PMethodSpec>,
-  ) {
-    this.transport = new FramedTransport({ send, onData: recv }, (f) => this.handleFrame(f));
+  constructor(conn: TP2PEncryptedSocket, private handlers: Record<string, TP2PMethodSpec>) {
+    conn.on("close", ()=>this.close());
+    this.transport = new FramedTransport(conn, (f) => this.handleFrame(f));
   }
 
   private async handleFrame(frame: Uint8Array): Promise<void> {
@@ -26,8 +23,7 @@ export class RpcServer {
       const { streamId, type, payload } = parseFrame(frame);
 
       if (type === FrameType.Ping) {
-        await this.transport.send(streamId, FrameType.Pong, null);
-        return;
+        return this.transport.send(streamId, FrameType.Pong, null);
       }
 
       if (type === FrameType.Pong) return;

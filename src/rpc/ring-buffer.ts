@@ -31,30 +31,53 @@ export class RingBuffer {
     this.size += data.length;
   }
 
-  peek(length: number): Uint8Array | null {
-    if (this.size < length) return null;
+  // peek(length: number): Uint8Array | null {
+  //   if (this.size < length) return null;
 
-    // Allocate from pool instead of directly creating
-    const result = gFramePool.alloc(length);
-    if (this.readPos + length <= this.buffer.length) {
-      result.set(this.buffer.subarray(this.readPos, this.readPos + length));
-    } else {
-      const firstPart = this.buffer.length - this.readPos;
-      result.set(this.buffer.subarray(this.readPos));
-      result.set(this.buffer.subarray(0, length - firstPart), firstPart);
-    }
-    return result;
-  }
+  //   // Allocate from pool instead of directly creating
+  //   const result = gFramePool.alloc(length);
+  //   if (this.readPos + length <= this.buffer.length) {
+  //     result.set(this.buffer.subarray(this.readPos, this.readPos + length));
+  //   } else {
+  //     const firstPart = this.buffer.length - this.readPos;
+  //     result.set(this.buffer.subarray(this.readPos));
+  //     result.set(this.buffer.subarray(0, length - firstPart), firstPart);
+  //   }
+  //   return result;
+  // }
 
   // Add a method to release peek buffers back to the pool
-  releasePeekBuffer(buffer: Uint8Array): void {
-    gFramePool.release(buffer);
-  }
+  // releasePeekBuffer(buffer: Uint8Array): void {
+  //   gFramePool.release(buffer);
+  // }
 
-  consume(length: number): void {
-    if (length > this.size) throw new Error("Cannot consume more than available");
-    this.readPos = (this.readPos + length) % this.buffer.length;
-    this.size -= length;
+  // consume(length: number): void {
+  //   if (length > this.size) throw new Error("Cannot consume more than available");
+  //   this.readPos = (this.readPos + length) % this.buffer.length;
+  //   this.size -= length;
+  // }
+
+  // return a sub-array view WITHOUT advancing read pointer
+  peekView(len: number): Uint8Array | null {
+    if (this.size < len) return null;
+    const { buffer, readPos } = this;
+    const cap = buffer.length;
+    if (readPos + len <= cap) return buffer.subarray(readPos, readPos + len);
+    // wrapped case – for simplicity we copy once here; if you want
+    // absolute zero-copy even when wrapped, return a two-piece view object.
+    const tmp = new Uint8Array(len);
+    const first = cap - readPos;
+    tmp.set(buffer.subarray(readPos, cap));
+    tmp.set(buffer.subarray(0, len - first), first);
+    return tmp;
+  }
+  
+  // return a view AND advance read pointer
+  readView(len: number): Uint8Array {
+    const v = this.peekView(len)!;   // caller already checked size
+    this.readPos = (this.readPos + len) % this.buffer.length;
+    this.size -= len;
+    return v;
   }
 
   get available(): number {

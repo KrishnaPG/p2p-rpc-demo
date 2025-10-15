@@ -2,8 +2,11 @@ import { encode } from "cbor-x";
 import { TransportError } from "./errors";
 import { gFramePool, MAX_FRAME_SIZE } from "./frame-pool";
 import { RingBuffer } from "./ring-buffer";
-import type { FrameType, ISocketLike, TP2PPayload } from "./types";
-import { concat } from "./utils";
+import type {
+	FrameType,
+	TP2PEncryptedSocket,
+	TP2PPayload,
+} from "./types";
 
 export function makeFrame(
 	streamId: number,
@@ -56,47 +59,34 @@ class FrameParser {
 		this.buffer.write(chunk);
 
 		while (this.buffer.available >= 8) {
-			// 1. PEEK: Get a temporary copy of the header from the pool.
-			const header = this.buffer.peek(8);
-			if (!header) break;
+			// 1. peek header (no consume, no copy)
+			const header = this.buffer.peekView(8);
+			if (!header) break; // not enough contiguous bytes yet
 
 			// 2. READ: Read the length from the temporary copy.
 			const v = new DataView(header.buffer, header.byteOffset);
 			const len = v.getUint8(4) | (v.getUint8(5) << 8) | (v.getUint8(6) << 16);
-
-			// 3. RELEASE: We are done with the header copy. Return it to the pool.
-			// This does NOT affect the data inside the RingBuffer.
-			this.buffer.releasePeekBuffer(header);
 
 			if (len > MAX_FRAME_SIZE) {
 				throw new TransportError(`Frame too large: ${len} bytes`);
 			}
 
 			const totalLen = 8 + len;
-			if (this.buffer.available < totalLen) break; // Not enough data to construct frames yet
+			if (this.buffer.available < totalLen) break; // not enough data yet
 
-			// 4. PEEK: Get a temporary copy of the full frame from the pool.
-			const frame = this.buffer.peek(totalLen);
-			if (!frame) break;
-
-			// 5. PROCESS: Give the temporary frame copy to the handler.
-			// handler must NOT release the frame, since we release it below;
+			// 4. consume the *whole* frame (header + payload) in one go
+			const frame = this.buffer.readView(totalLen);
 			this.onFrameHandler(frame);
-
-			// 6. CONSUME: This is the crucial step. We now tell the RingBuffer
-			// to discard its original data (header + payload). This advances the
-			// read pointer and frees up space in the RingBuffer's internal memory.
-			this.buffer.consume(totalLen);
-
-			// 7. RELEASE (Conditional): If the handler signaled it's done with the
-			// frame copy, we can now return it to the pool.
-			this.buffer.releasePeekBuffer(frame);
 		}
 	}
 
 	reset(): void {
-		this.buffer.destroy();
+		this.destroy();
 		this.buffer = new RingBuffer();
+	}
+
+	destroy() {
+		this.buffer.destroy();
 	}
 }
 
@@ -105,12 +95,11 @@ export class FramedTransport {
 	private closed = false;
 
 	constructor(
-		private socket: ISocketLike,
+		private socket: TP2PEncryptedSocket,
 		onFrame: (f: Uint8Array) => void,
 	) {
 		this.parser = new FrameParser(onFrame);
-		socket.onData((data) => this.feed(data));
-		socket.onClose?.(() => this.handleClose());
+		socket.on("message", onFrame); // (buf: Buffer) => this.feed(buf)
 	}
 
 	feed(chunk: Uint8Array): void {
@@ -123,31 +112,31 @@ export class FramedTransport {
 		}
 	}
 
-	async send(
+	send(
 		streamId: number,
 		type: FrameType,
 		body: TP2PPayload,
 	): Promise<void> {
 		if (this.closed) throw new TransportError("Transport closed");
 
-		let pooledBuffer: Uint8Array | null = null;
+		const payload = body == null ? new Uint8Array(0) : encode(body);
+		const needed = 8 + payload.length;
+		if (needed > MAX_FRAME_SIZE + 8)
+			throw new TransportError("Frame too large");
+
+		const frame = gFramePool.alloc(needed);
 		try {
-			const payload =
-				body !== null && body !== undefined ? encode(body) : new Uint8Array(0);
-			const frame = makeFrame(streamId, type, payload);
+			const v = new DataView(frame.buffer, frame.byteOffset);
+			v.setUint32(0, streamId, true);
+			v.setUint8(4, payload.length & 0xff);
+			v.setUint8(5, (payload.length >>> 8) & 0xff);
+			v.setUint8(6, (payload.length >>> 16) & 0xff);
+			v.setUint8(7, type);
+			frame.set(payload, 8); // single copy of payload bytes
 
-			// Keep reference to the underlying pooled buffer
-			pooledBuffer = new Uint8Array(frame.buffer);
-
-			await this.socket.send(frame);
-
-			// Successfully sent - release back to pool
-			return gFramePool.release(pooledBuffer);
+			return this.socket.send(frame).then(() => gFramePool.release(frame));
 		} catch (err) {
-			// Release on error too
-			if (pooledBuffer) {
-				gFramePool.release(pooledBuffer);
-			}
+			gFramePool.release(frame);
 			throw new TransportError(`Send failed: ${err}`);
 		}
 	}
@@ -155,11 +144,8 @@ export class FramedTransport {
 	close(): void {
 		if (this.closed) return;
 		this.closed = true;
-		this.parser.reset();
-	}
-
-	private handleClose(): void {
-		this.close();
+		this.parser.destroy();
+		this.socket.destroy();
 	}
 
 	get isClosed(): boolean {
