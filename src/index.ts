@@ -3,7 +3,7 @@ import { Bidder } from "./roles/bidder";
 import { Consumer } from "./roles/consumer";
 import { Provider } from "./roles/provider";
 
-const role = process.argv[2] || "provider";
+const role = process.argv[2] || "consumer";
 const auctionTopicArg = process.argv[3];
 
 const run = async () => {

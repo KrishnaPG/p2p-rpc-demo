@@ -2,11 +2,7 @@ import { encode } from "cbor-x";
 import { TransportError } from "./errors";
 import { gFramePool, MAX_FRAME_SIZE } from "./frame-pool";
 import { RingBuffer } from "./ring-buffer";
-import type {
-	FrameType,
-	TP2PEncryptedSocket,
-	TP2PPayload,
-} from "./types";
+import type { FrameType, TP2PEncryptedSocket, TP2PPayload } from "./types";
 
 // export function makeFrame(
 // 	streamId: number,
@@ -67,7 +63,8 @@ class FrameParser {
 			const v = new DataView(header.buffer, header.byteOffset);
 			const len = v.getUint8(4) | (v.getUint8(5) << 8) | (v.getUint8(6) << 16);
 
-			if (len > MAX_FRAME_SIZE) {
+			const topByte = v.getUint8(6);
+			if (topByte > 0xff || len >= MAX_FRAME_SIZE) {
 				throw new TransportError(`Frame too large: ${len} bytes`);
 			}
 
@@ -99,7 +96,7 @@ export class FramedTransport {
 		onFrame: (f: Uint8Array) => void,
 	) {
 		this.parser = new FrameParser(onFrame);
-		socket.on("message", onFrame); // (buf: Buffer) => this.feed(buf)
+		socket.on("message", onFrame /** Direct messages */); // (buf: Buffer) => this.feed(buf));
 	}
 
 	feed(chunk: Uint8Array): void {
@@ -112,20 +109,16 @@ export class FramedTransport {
 		}
 	}
 
-	send(
-		streamId: number,
-		type: FrameType,
-		body: TP2PPayload,
-	): Promise<void> {
+	send(streamId: number, type: FrameType, body: TP2PPayload): Promise<void> {
 		if (this.closed) throw new TransportError("Transport closed");
 
 		const payload = body == null ? new Uint8Array(0) : encode(body);
 		const needed = 8 + payload.length;
-		if (needed > MAX_FRAME_SIZE + 8)
+		if (needed >= MAX_FRAME_SIZE + 8)
 			throw new TransportError("Frame too large");
 
 		const frame = gFramePool.alloc(needed);
-		try {
+		{
 			const v = new DataView(frame.buffer, frame.byteOffset);
 			v.setUint32(0, streamId, true);
 			v.setUint8(4, payload.length & 0xff);
@@ -133,12 +126,13 @@ export class FramedTransport {
 			v.setUint8(6, (payload.length >>> 16) & 0xff);
 			v.setUint8(7, type);
 			frame.set(payload, 8); // single copy of payload bytes
-
-			return this.socket.send(frame).then(() => gFramePool.release(frame));
-		} catch (err) {
-			gFramePool.release(frame);
-			throw new TransportError(`Send failed: ${err}`);
 		}
+		return this.socket
+			.send(frame)
+			.catch((e: unknown) => {
+				throw new TransportError(`Send failed: ${e}`);
+			})
+			.finally(() => gFramePool.release(frame));
 	}
 
 	close(): void {

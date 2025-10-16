@@ -1,6 +1,7 @@
 import { decode } from "cbor-x";
 import { AsyncSink } from "./async-sink";
 import { TransportError } from "./errors";
+import { PeerBase } from "./peer-base";
 import { FramedTransport, parseFrame } from "./transport";
 import {
 	FrameType,
@@ -21,8 +22,7 @@ interface PendingRequest {
 
 export type TCloseCB = () => Promise<void>;
 
-export class RpcClient {
-	private transport: FramedTransport;
+export class RpcClient extends PeerBase {
 	private pending = new Map<number, PendingRequest>();
 	private idCounter = new Int32Array(new SharedArrayBuffer(4));
 	private heartbeatTimer?: NodeJS.Timeout;
@@ -31,9 +31,8 @@ export class RpcClient {
 	private closeCallbacks: Array<TCloseCB> = [];
 
 	constructor(conn: TP2PEncryptedSocket, heartBeat: boolean = false) {
+		super(conn);
 		this.idCounter[0] = 1; // Start at 1
-		conn.once("close", ()=>this.close());
-		this.transport = new FramedTransport(conn, (f) => this.handleFrame(f));
 		if (heartBeat) this.startHeartbeat();
 	}
 
@@ -112,7 +111,7 @@ export class RpcClient {
 		this.closeCallbacks.push(cb);
 	}
 
-	close(): Promise<unknown> {
+	override close(): Promise<unknown> {
 		if (this.closed) return Promise.resolve();
 		this.closed = true;
 
@@ -122,7 +121,8 @@ export class RpcClient {
 		this.pending.forEach((p) => p.reject(error));
 		this.pending.clear();
 
-		this.transport.close();
+		super.close();
+
 		return Promise.allSettled(this.closeCallbacks.map((cb) => cb()));
 	}
 
@@ -148,7 +148,7 @@ export class RpcClient {
 		return this.transport.send(streamId, FrameType.Close, null).catch(() => {});
 	}
 
-	private handleFrame(frame: Uint8Array): Promise<void> {
+	handleFrame(frame: Uint8Array): Promise<void> {
 		const { streamId, type, payload } = parseFrame(frame);
 
 		// Any incoming frame is proof of life
