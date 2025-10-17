@@ -15,6 +15,13 @@ export class Consumer {
 		swarm.join(MARKET_TOPIC, { server: false, client: true });
 
 		swarm.on("connection", async (conn, peerInfo) => {
+
+			// we do not set conn.setTimeout() here, as clients anyway reconnect no matter what;
+			// instead, the client need to shutoff the connection when not needed;
+			// Server anyway resets the connection after some inactivity (i.e. server reclaims its memory)
+			conn.setKeepAlive(0); // do not swamp the server
+			peerInfo.reconnect(0);// we have to do this on server's kick or when we have no further business
+
 			console.log(
 				`[CONSUMER] Connected to a provider: ${peerInfo.publicKey.toString("hex")}`,
 			);
@@ -24,10 +31,6 @@ export class Consumer {
 			conn.on("error", (err) => {
 				console.log("------error: ", err);
 			});
-			conn.setKeepAlive(0); // do not swamp the server
-			// we do not set conn.setTimeout() here, as clients anyway reconnect no matter what;
-			// instead, the client need to shutoff the connection when not needed;
-			// Server anyway resets the connection after some inactivity (i.e. server reclaims its memory)
 		});
 
 		await swarm.flush();
